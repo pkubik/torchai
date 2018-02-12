@@ -7,10 +7,7 @@ http://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html
 """
 
 import gym
-import math
-import random
 import matplotlib.pyplot as plt
-from collections import namedtuple, deque
 from typing import Iterable
 from itertools import count
 
@@ -21,29 +18,13 @@ from torch.autograd import Variable
 
 
 # if gpu is to be used
+from torchai.utils import Transition, ReplayMemory, DecayingBinaryRandom
+
 use_cuda = torch.cuda.is_available()
 FloatTensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
 LongTensor = torch.cuda.LongTensor if use_cuda else torch.LongTensor
 ByteTensor = torch.cuda.ByteTensor if use_cuda else torch.ByteTensor
 Tensor = FloatTensor
-
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
-
-
-class ReplayMemory:
-
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
-
-    def push(self, record: Transition):
-        self.buffer.append(record)
-
-    def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size)
-
-    def __len__(self):
-        return len(self.buffer)
 
 
 class DQN(nn.Module):
@@ -60,41 +41,45 @@ class DQN(nn.Module):
         self.fc3 = nn.Linear(self.fc2_size, self.fc3_size)
         self.bn3 = nn.BatchNorm1d(self.fc3_size)
         self.fc4 = nn.Linear(self.fc3_size, 2)
+        self.activation = nn.ReLU()
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.bn1(x)
-        x = F.relu(x)
+        return nn.Sequential(
+            self.fc1,
+            self.bn1,
+            self.activation,
+            self.fc2,
+            self.bn2,
+            self.activation,
+            self.fc3,
+            self.bn3,
+            self.activation,
+            self.fc4
+        )(x)
 
-        x = self.fc2(x)
-        x = self.bn2(x)
-        x = F.relu(x)
 
-        x = self.fc3(x)
-        x = self.bn3(x)
-        x = F.relu(x)
-
-        x = self.fc4(x)
-        return x
+class Batch:
+    def __init__(self, data):
+        self.state = [record.state for record in data]
+        self.state_tensor = FloatTensor(self.state)
+        self.action = [int(record.action) for record in data]
+        self.action_tensor = LongTensor(self.action)
+        self.reward = [record.reward for record in data]
+        self.reward_tensor = FloatTensor(self.reward)
+        self.next_state = [record.next_state for record in data]
+        self.next_state_tensor = FloatTensor([s for s in self.next_state if s is not None])
 
 
 class Actor:
     def __init__(self):
-        self.eps_start = 1.0
-        self.eps_end = 0.01
-        self.eps_decay = 1000
+        self.decaying_binary_random = DecayingBinaryRandom(eps_end=0.01)
         self.gamma = 0.999
         self.model = DQN()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
         self.response_counter = 0
 
-    def get_epsilon_threshold(self):
-        decay_factor = math.exp(-1. * self.response_counter / self.eps_decay)
-        return self.eps_end + (self.eps_start - self.eps_end) * decay_factor
-
     def apply_noise_to_response(self, response):
-        eps_threshold = self.get_epsilon_threshold()
-        if random.random() < eps_threshold:
+        if self.decaying_binary_random.sample(decay_steps=self.response_counter):
             _, index = torch.randn(2).max(0)
             return index[0]
         else:
@@ -107,21 +92,19 @@ class Actor:
         return response.cpu().data[0]
 
     def optimization_step(self, data: Iterable[Transition]):
-        state_batch = Variable(FloatTensor([record.state for record in data]))
-        action_batch = Variable(LongTensor([int(record.action) for record in data]))
-        reward_batch = Variable(FloatTensor([record.reward for record in data]))
+        batch = Batch(data)
+        state_var = Variable(batch.state_tensor)
+        action_var = Variable(batch.action_tensor)
+        reward_var = Variable(batch.reward_tensor)
 
-        non_final_mask = ByteTensor([record.next_state is not None for record in data])
-        non_final_next_states = Variable(FloatTensor([record.next_state for record in data
-                                                      if record.next_state is not None]),
-                                         volatile=True)
+        non_final_mask = ByteTensor([s is not None for s in batch.next_state])
+        non_final_next_states = Variable(batch.next_state_tensor, volatile=True)
 
-        action_values = self.model.train()(state_batch).gather(1, action_batch.unsqueeze(-1))
+        action_values = self.model.train()(state_var).gather(1, action_var.unsqueeze(-1))
 
-        next_state_values = Variable(torch.zeros(state_batch.data.size(0)).type(Tensor))
-        next_state_values[non_final_mask] = self.model.train()(non_final_next_states).max(1)[0]
-        next_state_values.volatile = False
-        expected_action_values = (self.gamma * next_state_values) + reward_batch
+        next_state_values = Variable(torch.zeros(state_var.data.size(0)).type(Tensor))
+        next_state_values[non_final_mask] = self.model.eval()(non_final_next_states).max(1)[0]
+        expected_action_values = (self.gamma * next_state_values) + reward_var
 
         # Huber loss
         loss = F.smooth_l1_loss(action_values, expected_action_values)
@@ -136,7 +119,7 @@ def run():
     env = gym.make('CartPole-v0').unwrapped
     plt.ion()
 
-    batch_size = 500
+    batch_size = 100
     actor = Actor()
 
     if use_cuda:
@@ -168,7 +151,7 @@ def run():
             actor.optimization_step(batch)
             if done:
                 print("Episode duration: {} | Epsilon threshold: {}".format(
-                    t, actor.get_epsilon_threshold()))
+                    t, actor.decaying_binary_random.eps_threshold(actor.response_counter)))
                 break
 
     print('Complete')
