@@ -5,6 +5,7 @@ Inspired by end-to-end tutorial for screen to action mapping using matplotlib:
 http://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html
 (although only ``gym`` observations are being used in this script)
 """
+from collections import deque
 
 import gym
 import matplotlib.pyplot as plt
@@ -28,12 +29,13 @@ Tensor = FloatTensor
 
 
 class DQN(nn.Module):
-    fc1_size = 100
-    fc2_size = 100
-    fc3_size = 100
+    fc1_size = 64
+    fc2_size = 32
+    fc3_size = 16
 
-    def __init__(self):
+    def __init__(self, use_symmetry=True):
         super(DQN, self).__init__()
+        self.use_symmetry = use_symmetry
         self.fc1 = nn.Linear(4, self.fc1_size)
         self.bn1 = nn.BatchNorm1d(self.fc1_size)
         self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
@@ -43,7 +45,7 @@ class DQN(nn.Module):
         self.fc4 = nn.Linear(self.fc3_size, 2)
         self.activation = nn.ReLU()
 
-    def forward(self, x):
+    def _forward(self, x):
         return nn.Sequential(
             self.fc1,
             self.bn1,
@@ -56,6 +58,23 @@ class DQN(nn.Module):
             self.activation,
             self.fc4
         )(x)
+
+    def _forward_with_symmetry(self, x):
+        direction = torch.sign(x[:, 0])
+        x = direction.view(-1, 1) * x
+
+        y = self._forward(x)
+
+        swap_index = torch.cat([(direction < 0).view(-1, 1), (direction > 0).view(-1, 1)], 1).type(LongTensor)
+        y = y.gather(1, swap_index)
+
+        return y
+
+    def forward(self, x):
+        if self.use_symmetry:
+            return self._forward_with_symmetry(x)
+        else:
+            return self._forward(x)
 
 
 class Batch:
@@ -126,6 +145,7 @@ def run():
         actor.model.cuda()
 
     memory = ReplayMemory(10000)
+    last_100_durations = deque(maxlen=100)
 
     num_episodes = 100000
     for i_episode in range(num_episodes):
@@ -143,15 +163,18 @@ def run():
             memory.push(Transition(state, action, next_state, reward))
             state = next_state
 
-            if len(memory) < batch_size:
+            if len(memory) < 2:
+                last_100_durations.append(t)
                 break
 
-            batch = memory.sample(batch_size)
+            batch = memory.sample(min(batch_size, len(memory)))
 
             actor.optimization_step(batch)
             if done:
-                print("Episode duration: {} | Epsilon threshold: {}".format(
-                    t, actor.decaying_binary_random.eps_threshold(actor.response_counter)))
+                last_100_durations.append(t)
+                mean_duration = sum(last_100_durations) / len(last_100_durations)
+                print("Episode: {:4} | Duration: {:5} | Mean duration: {:8.3f} | Epsilon threshold: {:.6}".format(
+                    i_episode, t, mean_duration, actor.decaying_binary_random.eps_threshold(actor.response_counter)))
                 break
 
     print('Complete')
