@@ -1,6 +1,6 @@
 import random
 import numpy as np
-from collections import namedtuple, deque
+from collections import namedtuple, deque, Callable
 
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward'))
@@ -34,3 +34,36 @@ class DecayingBinaryRandom:
 
     def sample(self, decay_steps: int) -> bool:
         return random.random() < self.eps_threshold(decay_steps)
+
+
+def parse_log_record(record: str) -> dict:
+    """
+    >>> r = parse_log_record("Episode:  328 | Duration:    17 | Mean duration:  106.670 | Epsilon threshold: 0.01")
+    >>> r == {"Episode": "328", "Duration": "17", "Mean duration": "106.670", "Epsilon threshold": "0.01"}
+    True
+    """
+    fields = record.split('|')
+    pairs = [field.split(':') for field in fields]
+    return {key.strip(): value.strip() for key, value in pairs}
+
+
+class SequenceCollector:
+    def __init__(self, predicate: Callable):
+        self.predicate = predicate
+        self.sequences = []
+        self._current_sequence = None
+
+    def push(self, item):
+        if self.predicate(item):
+            if self._current_sequence is None:
+                self._current_sequence = []
+            self._current_sequence.append(item)
+        else:
+            if self._current_sequence is not None:
+                self.sequences.append(self._current_sequence)
+                self._current_sequence = None
+
+    def close(self):
+        if self._current_sequence is not None:
+            self.sequences.append(self._current_sequence)
+            self._current_sequence = None

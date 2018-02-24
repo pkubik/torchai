@@ -29,34 +29,30 @@ Tensor = FloatTensor
 
 
 class DQN(nn.Module):
-    fc1_size = 64
-    fc2_size = 32
-    fc3_size = 16
+    fc1_size = 16
+    fc2_size = 16
 
-    def __init__(self, use_symmetry=True):
+    def __init__(self, use_symmetry=False):
         super(DQN, self).__init__()
         self.use_symmetry = use_symmetry
+        self.bn0 = nn.BatchNorm1d(4)
         self.fc1 = nn.Linear(4, self.fc1_size)
         self.bn1 = nn.BatchNorm1d(self.fc1_size)
         self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
         self.bn2 = nn.BatchNorm1d(self.fc2_size)
-        self.fc3 = nn.Linear(self.fc2_size, self.fc3_size)
-        self.bn3 = nn.BatchNorm1d(self.fc3_size)
-        self.fc4 = nn.Linear(self.fc3_size, 2)
-        self.activation = nn.ReLU()
+        self.fc3 = nn.Linear(self.fc2_size, 2)
+        self.activation = nn.ELU()
 
     def _forward(self, x):
         return nn.Sequential(
+            self.bn0,
             self.fc1,
+            self.activation,
             self.bn1,
-            self.activation,
             self.fc2,
+            self.activation,
             self.bn2,
-            self.activation,
-            self.fc3,
-            self.bn3,
-            self.activation,
-            self.fc4
+            self.fc3
         )(x)
 
     def _forward_with_symmetry(self, x):
