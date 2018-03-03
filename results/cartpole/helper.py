@@ -33,6 +33,15 @@ def extract_layers_sizes(log_name: str):
     return [int(i) for i in sizes_string.split('-')]
 
 
+def extract_regularization(log_name: str):
+    pattern = r'reg-([^_]*)'
+    occurrences = re.findall(pattern, log_name)
+    if len(occurrences) == 0:
+        return 0
+    reg_string = occurrences[0]
+    return int(reg_string)
+
+
 def compute_stats(log_df: pd.DataFrame):
     solved_score = 200
     longest_duration = 0

@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from typing import Iterable
 from itertools import count
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -89,8 +90,10 @@ class Actor:
     def __init__(self):
         self.decaying_binary_random = DecayingBinaryRandom(eps_end=0.01)
         self.gamma = 0.999
+        self.start_lr = 1e-3
+        self.stop_lr = 1e-9  # Used only with adaptive learning rate
         self.model = DQN()
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.start_lr, weight_decay=1e-5)
         self.response_counter = 0
 
     def apply_noise_to_response(self, response):
@@ -129,6 +132,9 @@ class Actor:
         loss.backward()
         self.optimizer.step()
 
+    def adjust_learning_rate(self, ratio: float):
+        self.optimizer.param_groups[0]['lr'] = self.stop_lr + (self.start_lr - self.stop_lr) * np.exp(-ratio)
+
 
 def run():
     env = gym.make('CartPole-v0').unwrapped
@@ -164,11 +170,15 @@ def run():
                 break
 
             batch = memory.sample(min(batch_size, len(memory)))
-
             actor.optimization_step(batch)
+
             if done:
                 last_100_durations.append(t)
                 mean_duration = sum(last_100_durations) / len(last_100_durations)
+
+                # Uncomment following line to turn the adaptive learning rate on
+                # actor.adjust_learning_rate(mean_duration / 100)
+
                 print("Episode: {:4} | Duration: {:5} | Mean duration: {:8.3f} | Epsilon threshold: {:.6}".format(
                     i_episode, t, mean_duration, actor.decaying_binary_random.eps_threshold(actor.response_counter)))
                 break
