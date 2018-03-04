@@ -18,7 +18,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-
 # if gpu is to be used
 from torchai.utils import Transition, ReplayMemory, DecayingBinaryRandom
 
@@ -30,31 +29,60 @@ Tensor = FloatTensor
 
 
 class DQN(nn.Module):
-    fc1_size = 16
-    fc2_size = 16
+    fc1_size = 8
+    fc2_size = 8
+    num_capsules = 4
 
     def __init__(self, use_symmetry=False):
         super(DQN, self).__init__()
         self.use_symmetry = use_symmetry
-        self.bn0 = nn.BatchNorm1d(4)
-        self.fc1 = nn.Linear(4, self.fc1_size)
+
+        self.cou = 0
+
+        self.bn0 = nn.BatchNorm1d(self.fc1_size)
+        self.fc1 = nn.Linear(self.fc1_size, self.fc1_size * self.num_capsules)
         self.bn1 = nn.BatchNorm1d(self.fc1_size)
         self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
         self.bn2 = nn.BatchNorm1d(self.fc2_size)
+        self.fc_join = nn.Linear(self.fc2_size, 1)
+        self.fc_q = nn.Linear(4, self.fc1_size)
+        self.fc_choice = nn.Linear(4, self.num_capsules)
         self.fc3 = nn.Linear(self.fc2_size, 2)
         self.activation = nn.ELU()
 
+        self.last_capsule_weights = np.zeros([self.num_capsules])
+
     def _forward(self, x):
-        return nn.Sequential(
-            self.bn0,
-            self.fc1,
-            self.activation,
-            self.bn1,
-            self.fc2,
-            self.activation,
-            self.bn2,
-            self.fc3
-        )(x)
+        #x = self.bn0(x)
+        #y = self.fc_q(x)
+        #if not self.cou % 4:
+        #    y = y.detach()
+        #y = self.activation(y)
+        #y = self.bn1(y)
+        q = self.fc_q(x)
+        c = self.fc_choice(x)
+        q = self.bn0(q)
+        c = 0.999 * c.detach() + 0.001 * c
+        x = self.fc1(q)
+        x = self.activation(x)
+        x = self.bn1(x.view([-1, self.fc1_size]))
+        x = x.view([-1, self.num_capsules, self.fc1_size])
+        #c = torch.matmul(x, y.unsqueeze(-1))
+        x = self.fc2(x)
+        x = self.activation(x)
+        #y = self.fc_join(x)
+        #sy = torch.nn.Softmax(-2)(y)
+        sc = torch.nn.Softmax(-1)(c * self.cou / 1000)
+        #x = torch.sum(x * sy, dim=-2)
+        x = torch.sum(x * sc.unsqueeze(-1), dim=-2)
+        x = self.bn2(x)
+        x = self.fc3(x)
+
+        if sc.shape[0] == 1:
+            self.last_capsule_weights = sc.squeeze().data.cpu().numpy()
+            self.cou += 1
+
+        return x
 
     def _forward_with_symmetry(self, x):
         direction = torch.sign(x[:, 0])
@@ -149,6 +177,16 @@ def run():
     memory = ReplayMemory(10000)
     last_100_durations = deque(maxlen=100)
 
+    plt.ion()
+    fig = plt.figure()
+    plot_buffer = deque(maxlen=30)
+    plot_buffer.extend(np.ones([DQN.num_capsules]) for _ in range(30))
+    capsule_heatmap = plt.imshow(np.array(plot_buffer), cmap='hot', interpolation='nearest')
+    ax = plt.gca()
+    ax.set_xlabel([0,122])
+    fig.canvas.draw()
+    plt.pause(0.1)
+
     num_episodes = 100000
     for i_episode in range(num_episodes):
         state = env.reset()
@@ -171,6 +209,11 @@ def run():
 
             batch = memory.sample(min(batch_size, len(memory)))
             actor.optimization_step(batch)
+
+            plot_buffer.append(actor.model.last_capsule_weights)
+            capsule_heatmap.set_array(np.array(plot_buffer))
+            capsule_heatmap.autoscale()
+            fig.canvas.draw()
 
             if done:
                 last_100_durations.append(t)
