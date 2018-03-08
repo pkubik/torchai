@@ -31,9 +31,10 @@ Tensor = FloatTensor
 class DQN(nn.Module):
     input_size = 4
     output_size = 2
-    fc1_size = 8
-    fc2_size = 8
-    num_capsules = 4
+    fc1_size = 4
+    #fc2_size = 32
+    num_capsules = 10
+    attention_softening_factor = [0 for _ in range(num_capsules)]
 
     def __init__(self, use_symmetry=False):
         super(DQN, self).__init__()
@@ -42,50 +43,59 @@ class DQN(nn.Module):
         self.cou = 0
 
         self.bn0 = nn.BatchNorm1d(self.input_size)
-        self.fc1 = nn.Linear(self.input_size, self.fc1_size * self.num_capsules)
+        self.fc1 = nn.Linear(self.input_size, self.fc1_size)
         self.bn1 = nn.BatchNorm1d(self.fc1_size)
-        self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
-        self.bn2 = nn.BatchNorm1d(self.fc2_size)
-        self.fc_join = nn.Linear(self.fc2_size, 1)
-        self.fc_q = nn.Linear(4, self.fc1_size)
-        self.fc_choice = nn.Linear(self.input_size, self.num_capsules)
-        self.fc3 = nn.Linear(self.fc2_size, self.output_size)
+        #self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
+        #self.bn2 = nn.BatchNorm1d(self.fc2_size)
+
+        self.fcs = nn.ModuleList()#[nn.Linear(self.fc1.out_features, self.fc1_size)])
+        self.bns = nn.ModuleList()#[nn.BatchNorm1d(self.fc1_size)])
+        prev_size = self.fc1_size
+        prev_res_size = 0
+        for _ in range(self.num_capsules):
+            fc = nn.Linear(prev_size + prev_res_size, self.fc1_size)
+            bn = nn.BatchNorm1d(self.fc1_size)
+            self.fcs.append(fc)
+            self.bns.append(bn)
+            prev_res_size = prev_size
+            prev_size = self.fc1_size
+
+        self.fc_final = nn.Linear(prev_size, self.output_size)
         self.activation = nn.ELU()
 
         self.last_capsule_weights = np.zeros([self.num_capsules])
 
+    def get_layer_usage(self, matrix: Variable):
+        v1 = matrix.data[:, :self.fc1_size]
+        v2 = matrix.data[:, self.fc1_size:]
+        s1 = torch.mean(v1.abs())
+        s2 = torch.mean(v2.abs())
+        return s1 / (s1 + s2)
+
     def _forward(self, x):
         x = self.bn0(x)
-        #y = self.fc_q(x)
-        #if not self.cou % 4:
-        #    y = y.detach()
-        #y = self.activation(y)
-        #y = self.bn1(y)
-        #q = self.fc_q(x)
-        c = self.fc_choice(x)
-        #q = self.bn0(q)
-        self.c = c
-        #c = 0.9 * c.detach() + 0.1 * c
         x = self.fc1(x)
+        x = self.bn1(x)
         x = self.activation(x)
-        x = self.bn1(x.view([-1, self.fc1_size]))
-        x = x.view([-1, self.num_capsules, self.fc1_size])
-        #c = torch.matmul(x, y.unsqueeze(-1))
-        x = self.fc2(x)
-        x = self.activation(x)
-        #y = self.fc_join(x)
-        #sy = torch.nn.Softmax(-2)(y)
-        sc = torch.nn.Softmax(-1)(c * self.cou / 1000)
-        #x = torch.sum(x * sy, dim=-2)
-        x = torch.sum(x * sc.unsqueeze(-1), dim=-2)
-        x = self.bn2(x)
-        x = self.fc3(x)
 
-        if sc.shape[0] == 1:
-            self.last_capsule_weights = sc.squeeze().data.cpu().numpy()
+        prev = [x]
+        for fc, bn in zip(self.fcs, self.bns):
+            c = torch.cat(prev[-2:], dim=-1)
+            h = fc(c)
+            #b = bn(h)
+            a = self.activation(h)
+            prev.append(a)
+
+        out = self.fc_final(prev[-1])
+
+        if x.shape[0] == 1:
+            self.last_capsule_weights = [self.get_layer_usage(fc.weight)
+                                         if fc.in_features > self.fc1_size
+                                         else 1.0
+                                         for fc in self.fcs]
             self.cou += 1
 
-        return x
+        return out
 
     def _forward_with_symmetry(self, x):
         direction = torch.sign(x[:, 0])
@@ -151,7 +161,8 @@ class Actor:
 
         action_values = self.model.train()(state_var).gather(1, action_var.unsqueeze(-1))
         loss = 0
-        loss += 0.001 * torch.norm(self.model.c, 2)
+        # if int(self.model.cou / 200) % 2:
+        #     loss += 0.1 * torch.norm(self.model.c, 2)
 
         next_state_values = Variable(torch.zeros(state_var.data.size(0)).type(Tensor))
         next_state_values[non_final_mask] = self.model.eval()(non_final_next_states).max(1)[0]
@@ -166,14 +177,15 @@ class Actor:
         self.optimizer.zero_grad()
         loss.backward()
 
-        if not int(self.model.cou / 200) % 2:
-            print("#", end='')
-            self.model.fc1.weight.grad *= 0.0
-            self.model.fc2.weight.grad *= 0.0
-            self.model.fc3.weight.grad *= 0.0
-        else:
-            print("$", end='')
-            self.model.fc_choice.weight.grad *= 0.0
+        # if not int(self.model.cou / 200) % 2:
+        #     self.model.fc1.weight.grad *= 0.0
+        #     self.model.fc2.weight.grad *= 0.0
+        #     self.model.fc3.weight.grad *= 0.0
+        # else:
+        #     self.model.fc_choice.weight.grad *= 0.0
+        #     self.model.fc2.weight.grad *= 0.1
+        #     self.model.fc3.weight.grad *= 0.1
+        self.model.fc1.weight.grad *= 0.2
 
         self.optimizer.step()
 
@@ -200,7 +212,8 @@ def run():
     plot_buffer.extend(np.ones([DQN.num_capsules]) for _ in range(30))
     capsule_heatmap = plt.imshow(np.array(plot_buffer), cmap='hot', interpolation='nearest')
     ax = plt.gca()
-    ax.set_xlabel([0,122])
+    ax.set_xlabel([0, 122])
+    plt.clim(0, 1)
     fig.canvas.draw()
     plt.pause(0.1)
 
@@ -229,7 +242,6 @@ def run():
 
             plot_buffer.append(actor.model.last_capsule_weights)
             capsule_heatmap.set_array(np.array(plot_buffer))
-            capsule_heatmap.autoscale()
             fig.canvas.draw()
 
             if done:
@@ -237,8 +249,7 @@ def run():
                 mean_duration = sum(last_100_durations) / len(last_100_durations)
 
                 # Uncomment following line to turn the adaptive learning rate on
-                # actor.adjust_learning_rate(mean_duration / 100)
-                print()
+                actor.adjust_learning_rate(mean_duration / 100)
                 print("Episode: {:4} | Duration: {:5} | Mean duration: {:8.3f} | Epsilon threshold: {:.6}".format(
                     i_episode, t, mean_duration, actor.decaying_binary_random.eps_threshold(actor.response_counter)))
                 break
